@@ -10,33 +10,52 @@ page on port 80.
 
 ## Hardware
 
-| GPS module pin | ESP32 pin | Notes |
+Written for the **QRP Labs QLG3** (the GPS module for the QMX+). It uses an
+EByte E108 receiver (GK9501 chip) and comes with an active antenna. It should
+work with any GPS that outputs 3.3 V NMEA and a 1PPS.
+
+| QLG3 signal | ESP32 pin | Notes |
 |---|---|---|
+| Power | **3V3** | QLG3 needs a *regulated 3.3 V* supply. Do **not** use 5 V/VIN |
 | GND | GND | |
-| VCC / power in | 3V3 or 5V (VIN) | Use whatever supply voltage your module's manual specifies |
-| TX / serial data out | GPIO16 | NMEA, 9600 baud by default |
-| RX / serial data in | GPIO17 | Optional. The firmware never sends anything to the GPS |
-| 1PPS | GPIO4 | Strongly recommended. Without it you get ~10 ms accuracy instead of microseconds |
+| Serial data out | GPIO16 | NMEA at 9600 baud |
+| Serial data in (pin 3) | GPIO17 | Used to send the GPS-only command at boot (see below) |
+| 1pps out | GPIO4 | Needed for microsecond accuracy |
 
-You can change the pins in `include/config.h`.
+The QLG3's outputs are 2.8 V logic, which the ESP32 reads fine directly. No
+level shifting is needed.
 
-### Check these on the QRP Labs module before you wire it up
+Check which pad is which on your board's silkscreen or in the QMX+ assembly
+manual. The QMX+ only wires serial out and 1pps; the ESP32 also uses serial
+in (pin 3). QRP Labs' own E108 firmware-fix procedure wires a 3.3 V
+microcontroller TX straight to this pin. A 1 kΩ series resistor in that line
+is a cheap extra safeguard.
 
-QRP Labs has shipped several GPS boards and revisions, so confirm these with
-the module's own manual or a multimeter/scope:
+The ESP32 dev board's 3.3 V regulator easily covers the QLG3 and its active
+antenna. Put the antenna by a window or outside; the status output shows the
+satellite count.
 
-1. **Logic levels.** The ESP32 is a **3.3 V part and its pins are not 5 V
-   tolerant.** If the module's TX or 1PPS swings to 5 V, add a divider on each
-   line. For example, 10 kΩ in series and 20 kΩ to ground gives about 3.3 V.
-2. **Use the TTL-level serial output, not the RS-232-level one.** Some QRP Labs
-   GPS boards have both. An RS-232-level signal (swings negative, up to ±12 V)
-   will damage the ESP32.
-3. **Baud rate.** It is almost always 9600. If the status output shows
-   `nmea=0`, try 4800 or 38400 in `GPS_BAUD`.
-4. **PPS polarity.** Most modules pulse high at the top of the second. If yours
-   pulses low, set `PPS_RISING_EDGE 0`.
-5. **Antenna.** The module needs a clear view of the sky, or an active antenna
-   placed by a window, to get a fix. The status line shows the satellite count.
+### The QLG3 date bug (why the ESP32 sends a command to the GPS)
+
+QLG3 modules shipped before about August 2025 may have E108 firmware with a
+week-rollover bug. When GPS and BeiDou satellites are used together, it
+sometimes reports a date about **19.6 years in the past** and the 1pps
+becomes unstable. For a time server that would be a disaster. The firmware
+defends against it in two ways:
+
+1. **At boot it sends `$PGKC115,1,0,0,0*2B`**, which switches the receiver to
+   GPS-only (GLONASS, BeiDou and Galileo off). This avoids the bug, and GPS
+   alone is plenty for timing. It needs the GPIO17 → QLG3 serial-in wire. If
+   your module has the fixed E108 firmware, you can set `GPS_INIT_COMMANDS` to
+   `""` in `include/config.h` to use every constellation.
+2. **It sanity-checks everything the GPS says:**
+   - Dates before `MIN_VALID_UNIX_TIME` (2026-01-01) are ignored.
+   - A time jump is only accepted once 3 fixes in a row agree.
+   - A 1pps pulse that doesn't arrive about 1 s after the previous one is
+     ignored.
+
+   The counters `bad_dates`, `bad_steps` and `bad_pulses` in the status output
+   show whether any of this is happening.
 
 ## Building and flashing
 
@@ -53,11 +72,16 @@ On the serial monitor you should see something like:
 ```
 WiFi connected, IP 192.168.1.50
 NTP server listening on UDP 123
-[2026-09-23 12:35:19 UTC] src=PPS synced=1 holdover=0 age=0s sats=9 fixq=1 pps=312 freq=+11.84ppm ntp_reqs=4 nmea=1250 cserr=0
+Sent GPS init: $PGKC115,1,0,0,0*2B
+[2026-09-23 12:35:19 UTC] src=PPS synced=1 holdover=0 age=0s sats=9 fixq=1 pps=312 freq=+11.84ppm ntp_reqs=4 nmea=1250 cserr=0 bad_dates=0 bad_steps=0 bad_pulses=0
 ```
 
 - `src=PPS` means the 1PPS is being used. `src=NMEA` means PPS isn't being
   seen, so check the wiring and polarity.
+- `nmea=0` means no data is arriving from the GPS. Check the serial-out wire
+  and the 3.3 V supply.
+- Rising `bad_dates` means your QLG3 has the date bug and the GPS-only command
+  isn't reaching it. Check the GPIO17 wire.
 - `freq` is the measured error of the ESP32's crystal. It settles after a
   minute or so and is corrected for automatically.
 - Browse to `http://<ip>/` (or `http://gps-ntp.local/`) for a live status page.
@@ -110,10 +134,6 @@ after boot it doesn't answer at all.
 | `src/ntp_server.*` | NTPv3/v4 server-mode responder on UDP 123 |
 | `src/status_page.*` | HTTP status page |
 | `include/config.h` | Pins, baud rate and tuning knobs |
-| `test/host/` | Parser tests that run on your PC (no ESP32 needed) |
+| `test/host/` | Parser and timekeeper tests that run on your PC (no ESP32 needed) |
 
-Run the host tests with:
-
-```sh
-g++ -std=c++17 -Wall -Wextra -Isrc test/host/test_nmea.cpp src/nmea.cpp -o test_nmea && ./test_nmea
-```
+Run the host tests with `test/host/run.sh` (needs only `g++`).

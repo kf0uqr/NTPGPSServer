@@ -41,6 +41,17 @@ const int64_t PPS_PRESENT_US = 3000000;
 // Treated as holdover once GPS updates stop for this long.
 const int64_t HOLDOVER_AFTER_US = 3000000;
 
+// Consecutive fixes that must agree before accepting a time step.
+const uint32_t STEP_CONFIRMATIONS = 3;
+
+// Sanity-check state and counters. Only touched from the main loop.
+int64_t pendingStep = 0;
+uint32_t pendingStepCount = 0;
+uint32_t rejectedDates = 0;
+uint32_t rejectedSteps = 0;
+uint32_t acceptedSteps = 0;
+uint32_t badPulses = 0;
+
 void IRAM_ATTR ppsIsr() {
     const int64_t t = esp_timer_get_time();
     portENTER_CRITICAL_ISR(&mux);
@@ -60,6 +71,57 @@ void convert(int64_t localUs, int64_t aSec, int64_t aUs, double rate,
     micros = (uint32_t)(total % 1000000LL);
 }
 
+// Decide whether a new (utc, localUs) anchor is believable, given the
+// current one. GPS receivers occasionally report a wrong date or time (the
+// QLG3's E108 module is known to jump back ~19.6 years), so a jump of a
+// second or more is only accepted once several consecutive fixes agree.
+bool acceptAnchor(time_t utc, int64_t localUs) {
+    if (utc < (time_t)MIN_VALID_UNIX_TIME) {
+        rejectedDates++;
+        return false;
+    }
+
+    portENTER_CRITICAL(&mux);
+    const bool anchored = haveAnchor;
+    const int64_t aSec = anchorSec, aUs = anchorUs;
+    const double rate = rateUsPerSec;
+    portEXIT_CRITICAL(&mux);
+    if (!anchored) return true;
+
+    int64_t predSec;
+    uint32_t predUs;
+    convert(localUs, aSec, aUs, rate, predSec, predUs);
+    if (predUs >= 500000) predSec++;  // round to the nearest second
+    const int64_t offset = (int64_t)utc - predSec;
+
+    if (offset == 0) {
+        pendingStepCount = 0;
+        return true;
+    }
+    if (offset == pendingStep) {
+        pendingStepCount++;
+    } else {
+        pendingStep = offset;
+        pendingStepCount = 1;
+    }
+    if (pendingStepCount < STEP_CONFIRMATIONS) {
+        rejectedSteps++;
+        return false;
+    }
+    pendingStepCount = 0;
+    acceptedSteps++;
+    return true;
+}
+
+void setAnchor(time_t utc, int64_t localUs, SyncSource src) {
+    portENTER_CRITICAL(&mux);
+    anchorSec = utc;
+    anchorUs = localUs;
+    haveAnchor = true;
+    source = src;
+    portEXIT_CRITICAL(&mux);
+}
+
 }  // namespace
 
 void begin(int ppsPin, bool risingEdge) {
@@ -73,6 +135,8 @@ void onNmeaTime(time_t utc, int64_t burstStartUs, int nmeaOffsetMs) {
     portENTER_CRITICAL(&mux);
     const int64_t pps = lastPpsUs;
     const int64_t prev = prevPpsUs;
+    const bool wasPps = haveAnchor && source == SyncSource::Pps &&
+                        nowUs - anchorUs < PPS_PRESENT_US;
     portEXIT_CRITICAL(&mux);
 
     const int64_t ppsAge = nowUs - pps;
@@ -87,30 +151,32 @@ void onNmeaTime(time_t utc, int64_t burstStartUs, int nmeaOffsetMs) {
         const bool goodInterval =
             prev != 0 && llabs(interval - 1000000LL) <= MAX_INTERVAL_ERR_US;
 
-        portENTER_CRITICAL(&mux);
+        // While locked, a pulse that isn't ~1 s after the previous one is a
+        // glitch or follows a missed pulse. Don't move the anchor to it.
+        if (wasPps && !goodInterval) {
+            badPulses++;
+            return;
+        }
+        if (!acceptAnchor(utc, pps)) return;
+
         if (goodInterval) {
             // Running average; converges quickly at first, then smooths the
             // few-microsecond interrupt latency jitter.
+            portENTER_CRITICAL(&mux);
             rateSamples++;
             const double alpha = rateSamples < 32 ? 1.0 / rateSamples : 1.0 / 32;
             rateUsPerSec += ((double)interval - rateUsPerSec) * alpha;
+            portEXIT_CRITICAL(&mux);
         }
-        anchorSec = utc;
-        anchorUs = pps;
-        haveAnchor = true;
-        source = SyncSource::Pps;
-        portEXIT_CRITICAL(&mux);
+        setAnchor(utc, pps, SyncSource::Pps);
         return;
     }
 
     // No PPS: use the start of the NMEA burst as the second marker.
     if (nowUs - burstStartUs > 1000000LL) return;
-    portENTER_CRITICAL(&mux);
-    anchorSec = utc;
-    anchorUs = burstStartUs - (int64_t)nmeaOffsetMs * 1000;
-    haveAnchor = true;
-    source = SyncSource::Nmea;
-    portEXIT_CRITICAL(&mux);
+    const int64_t markUs = burstStartUs - (int64_t)nmeaOffsetMs * 1000;
+    if (!acceptAnchor(utc, markUs)) return;
+    setAnchor(utc, markUs, SyncSource::Nmea);
 }
 
 bool at(int64_t localUs, int64_t &unixSec, uint32_t &micros) {
@@ -152,6 +218,10 @@ TimeStatus status() {
     portEXIT_CRITICAL(&mux);
 
     s.freqPpm = samples ? rate - 1e6 : 0.0;  // 1 us per s == 1 ppm
+    s.rejectedDates = rejectedDates;
+    s.rejectedSteps = rejectedSteps;
+    s.acceptedSteps = acceptedSteps;
+    s.badPulses = badPulses;
     if (!ok) {
         s.source = SyncSource::None;
         return s;

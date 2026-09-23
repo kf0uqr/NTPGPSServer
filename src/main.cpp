@@ -34,6 +34,19 @@ static void onNetworkUp() {
 #endif
 }
 
+// Send GPS_INIT_COMMANDS. Done a couple of times after boot in case the GPS
+// was still starting up the first time.
+static void sendGpsInit() {
+    static const uint32_t SEND_AT_MS[] = {1500, 5000};
+    static size_t next = 0;
+    if (sizeof(GPS_INIT_COMMANDS) <= 1 || next >= sizeof(SEND_AT_MS) / sizeof(SEND_AT_MS[0]))
+        return;
+    if (millis() < SEND_AT_MS[next]) return;
+    gpsSerial.print(GPS_INIT_COMMANDS);
+    Serial.printf("Sent GPS init: %s", GPS_INIT_COMMANDS);
+    next++;
+}
+
 static void printStatus() {
     const TimeStatus st = timekeeper::status();
     int64_t sec;
@@ -47,11 +60,13 @@ static void printStatus() {
     }
     Serial.printf(
         "[%s UTC] src=%s synced=%d holdover=%d age=%us sats=%u fixq=%u "
-        "pps=%u freq=%+.2fppm ntp_reqs=%u nmea=%u cserr=%u\n",
+        "pps=%u freq=%+.2fppm ntp_reqs=%u nmea=%u cserr=%u "
+        "bad_dates=%u bad_steps=%u bad_pulses=%u\n",
         when, sourceName(st.source), st.synced, st.holdover, (unsigned)st.sinceSyncS,
         nmea.satellites(), nmea.fixQuality(), (unsigned)st.ppsCount, st.freqPpm,
         (unsigned)ntp_server::requestsServed(), (unsigned)nmea.sentences(),
-        (unsigned)nmea.checksumErrors());
+        (unsigned)nmea.checksumErrors(), (unsigned)st.rejectedDates,
+        (unsigned)st.rejectedSteps, (unsigned)st.badPulses);
 }
 
 void setup() {
@@ -80,6 +95,8 @@ void loop() {
             timekeeper::onNmeaTime(nmea.utc(), nmea.burstStartUs(), NMEA_OFFSET_MS);
         }
     }
+
+    sendGpsInit();
 
     const bool up = WiFi.status() == WL_CONNECTED;
     if (up && !networkUp) onNetworkUp();

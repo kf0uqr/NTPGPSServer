@@ -38,14 +38,17 @@ String json() {
              "\"clock_error_ppm\":%.3f,\"pps_count\":%u,\"satellites\":%u,"
              "\"fix_quality\":%u,\"hdop\":%.1f,\"nmea_sentences\":%u,"
              "\"nmea_checksum_errors\":%u,\"ntp_requests\":%u,\"wifi_rssi\":%d,"
-             "\"uptime_s\":%lu}",
+             "\"uptime_s\":%lu,\"rejected_dates\":%u,\"rejected_steps\":%u,"
+             "\"accepted_steps\":%u,\"bad_pulses\":%u}",
              utcString().c_str(), sourceName(st.source),
              st.synced ? "true" : "false", st.holdover ? "true" : "false",
              (unsigned)st.sinceSyncS, st.dispersionS, st.freqPpm, (unsigned)st.ppsCount,
              gps->satellites(), gps->fixQuality(), gps->hdop(), (unsigned)gps->sentences(),
              (unsigned)gps->checksumErrors(), (unsigned)ntp_server::requestsServed(),
              (int)WiFi.RSSI(),
-             (unsigned long)(millis() / 1000));
+             (unsigned long)(millis() / 1000), (unsigned)st.rejectedDates,
+             (unsigned)st.rejectedSteps, (unsigned)st.acceptedSteps,
+             (unsigned)st.badPulses);
     return buf;
 }
 

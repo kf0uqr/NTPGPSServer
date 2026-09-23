@@ -1,5 +1,5 @@
 // Host-side tests for the NMEA parser. No ESP32 needed:
-//   g++ -std=c++17 -Wall -Wextra -Isrc test/host/test_nmea.cpp src/nmea.cpp -o /tmp/test_nmea && /tmp/test_nmea
+//   test/host/run.sh
 #include "nmea.h"
 
 #include <stdio.h>

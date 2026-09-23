@@ -22,6 +22,10 @@ struct TimeStatus {
     double freqPpm;       // measured ESP32 clock error (+ = local clock fast)
     uint32_t ppsCount;
     double dispersionS;   // estimated error bound, for NTP root dispersion
+    uint32_t rejectedDates;  // GPS times before MIN_VALID_UNIX_TIME
+    uint32_t rejectedSteps;  // time jumps ignored as probable GPS glitches
+    uint32_t acceptedSteps;  // time jumps accepted after confirmation
+    uint32_t badPulses;      // PPS pulses not ~1 s after the previous one
 };
 
 namespace timekeeper {
