@@ -132,9 +132,11 @@ static void printStatus() {
         (unsigned)st.rejectedSteps, (unsigned)st.badPulses, (unsigned)gpsRxBytes,
         (unsigned)BAUD_RATES[baudIndex], wifiStateName(WiFi.status()));
 
-    if (gpsRxBytes == 0 && millis() > 5000) {
+    // A GPS sends several hundred bytes a second, fix or no fix. A stray
+    // byte or two is just noise from power-up.
+    if (gpsRxBytes < 50 && millis() > 5000) {
         Serial.printf(
-            "  !! No bytes at all from the GPS on GPIO%d. Check: GPS serial-out -> GPIO%d "
+            "  !! No data from the GPS on GPIO%d. Check: GPS serial-out -> GPIO%d "
             "(labelled RX2 on many boards), GND shared, GPS powered from 3V3. "
             "GPIO16/17 don't work on WROVER/PSRAM boards.\n",
             GPS_RX_PIN, GPS_RX_PIN);
